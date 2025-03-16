@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import random
+import os
 
 # Database setup for user authentication, reviews, and recommendation feedback
 conn = sqlite3.connect("user_data.db", check_same_thread=False)
 c = conn.cursor()
+
+# Create required tables
 c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,10 +42,18 @@ CREATE TABLE IF NOT EXISTS history (
 """)
 conn.commit()
 
-# Load movie dataset
-movies_df = pd.read_csv("movies.csv")
-movies_df["genres"] = movies_df["genres"].apply(lambda x: x.split('|'))
+# Load movie dataset dynamically
+base_dir = os.path.dirname(os.path.abspath(__file__))
+movies_file = os.path.join(base_dir, "movies.csv")
 
+if os.path.exists(movies_file):
+    movies_df = pd.read_csv(movies_file)
+    movies_df["genres"] = movies_df["genres"].apply(lambda x: x.split('|'))
+else:
+    st.error("Error: `movies.csv` file not found! Please check its location.")
+    st.stop()
+
+# Functions for User Authentication
 def register_user(username, password):
     try:
         c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
@@ -56,31 +66,40 @@ def authenticate_user(username, password):
     c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
     return c.fetchone()
 
+# Function to get recommendations
 def get_recommendations(movie_title, disliked_movies=[]):
     matched_movies = movies_df[movies_df["title"].str.contains(movie_title, case=False, na=False)]
     matched_movies = matched_movies[~matched_movies["title"].isin(disliked_movies)]
-    return matched_movies.sample(n=min(10, len(matched_movies))) if not matched_movies.empty else pd.DataFrame()
+    
+    if matched_movies.empty:
+        return pd.DataFrame(columns=["title"])  # Return an empty DataFrame with title column
 
+    return matched_movies.sample(n=min(10, len(matched_movies)))
+
+# Function to get sequel recommendations
 def get_sequels(movie_title):
     sequels = movies_df[movies_df["title"].str.contains(movie_title, case=False, na=False)]
-    return sequels.sample(n=min(5, len(sequels)), replace=False) if not sequels.empty else pd.DataFrame()
+    return sequels.sample(n=min(5, len(sequels))) if not sequels.empty else pd.DataFrame(columns=["title"])
 
+# Save search history
 def save_history(username, movie_title, recommended_movies):
     c.execute("INSERT INTO history (username, searched_movie, recommended_movies) VALUES (?, ?, ?)", 
               (username, movie_title, ", ".join(recommended_movies)))
     conn.commit()
 
+# Get user search history
 def get_history(username):
     c.execute("SELECT searched_movie, recommended_movies FROM history WHERE username=?", (username,))
     return c.fetchall()
 
-# Streamlit UI
+# Streamlit UI Setup
 st.set_page_config(page_title="Movie Recommendation System", layout="wide")
 st.title("🎬 Movie Recommendation System")
 st.sidebar.title("🔑 User Authentication")
 
 menu = st.sidebar.selectbox("Menu", ["Login", "Sign Up", "Home", "History", "Logout"])
 
+# User Registration
 if menu == "Sign Up":
     username = st.sidebar.text_input("Username")
     password = st.sidebar.text_input("Password", type="password")
@@ -90,6 +109,7 @@ if menu == "Sign Up":
         else:
             st.sidebar.error("Username already exists!")
 
+# User Login
 if menu == "Login":
     username = st.sidebar.text_input("Username")
     password = st.sidebar.text_input("Password", type="password")
@@ -97,12 +117,15 @@ if menu == "Login":
         user = authenticate_user(username, password)
         if user:
             st.session_state["user"] = username
-            st.sidebar.success(f"Welcome {username}!")
+            st.sidebar.success(f"Welcome {username}! Redirecting to Home...")
+            st.rerun()
         else:
             st.sidebar.error("Invalid Credentials")
 
+# Home Page - Movie Recommendations
 if menu == "Home" and "user" in st.session_state:
     movie_input = st.text_input("Enter your favorite movie:")
+    
     if "rec_rating" not in st.session_state:
         st.session_state["rec_rating"] = 3
     if "disliked_movies" not in st.session_state:
@@ -111,9 +134,9 @@ if menu == "Home" and "user" in st.session_state:
     if st.button("Get Recommendations") or "recommendations" in st.session_state:
         recommendations = get_recommendations(movie_input, st.session_state["disliked_movies"])
         st.session_state["recommendations"] = recommendations if not recommendations.empty else None
-        if "user" in st.session_state:
+        if "user" in st.session_state and not recommendations.empty:
             save_history(st.session_state["user"], movie_input, recommendations["title"].tolist())
-        
+
     if "recommendations" in st.session_state and st.session_state["recommendations"] is not None:
         displayed_movies = []
         for _, row in st.session_state["recommendations"].iterrows():
@@ -129,7 +152,8 @@ if menu == "Home" and "user" in st.session_state:
 
         # Feedback on Recommendations
         st.write("## Rate the Recommendations:")
-        rec_rating = st.selectbox("How good were the recommendations?", [1, 2, 3, 4, 5], index=st.session_state["rec_rating"]-1, key="rec_rating")
+        rec_rating = st.selectbox("How good were the recommendations?", [1, 2, 3, 4, 5], 
+                                  index=st.session_state["rec_rating"]-1, key="rec_rating")
         disliked_movies = st.multiselect("Which movies did you not prefer?", displayed_movies, key="disliked_movies")
 
         if st.button("Submit Feedback"):
@@ -145,15 +169,18 @@ if menu == "Home" and "user" in st.session_state:
                 st.error("We'll completely change the recommendations next time!")
                 st.session_state["recommendations"] = get_recommendations(movie_input, disliked_movies)
 
+# User History Page
 if menu == "History" and "user" in st.session_state:
     st.write("## Search History")
     history = get_history(st.session_state["user"])
     for search in history:
-        st.write(f"Movie: {search[0]} - Recommended: {search[1]}")
+        st.write(f"**Movie:** {search[0]} - **Recommended:** {search[1]}")
 
+# Logout Functionality
 if menu == "Logout":
     st.session_state.clear()
     st.sidebar.success("Logged out successfully!")
+    st.rerun()
 
 # Footer
 st.sidebar.write("Developed by **Peethala V Siva Sampath Likhit**")
